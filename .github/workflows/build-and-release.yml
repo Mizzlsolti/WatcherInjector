@@ -22,19 +22,38 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure (${{ matrix.arch }})
-        run: cmake -S . -B build-${{ matrix.arch }} -A ${{ matrix.arch }} -DCMAKE_BUILD_TYPE=Release
+        run: >
+          cmake -S . -B build-${{ matrix.arch }}
+          -G "Visual Studio 17 2022"
+          -A ${{ matrix.arch }}
+          -DCMAKE_BUILD_TYPE=Release
 
       - name: Build (${{ matrix.arch }})
         run: cmake --build build-${{ matrix.arch }} --config Release
 
-      - name: Rename outputs
+      - name: Show tree (${{ matrix.arch }})
+        shell: pwsh
+        run: |
+          Write-Host "== Tree of build-${{ matrix.arch }} =="
+          Get-ChildItem -Recurse "build-${{ matrix.arch }}" | Select-Object FullName
+
+      - name: Collect outputs (robust) ${{ matrix.arch }}
         shell: pwsh
         run: |
           $arch = "${{ matrix.arch }}"
           $suffix = if ($arch -eq "x64") { "64" } else { "32" }
           New-Item -ItemType Directory -Force out | Out-Null
-          Copy-Item "build-$arch/bin/Release/WatcherInjector.dll" "out/WatcherInjector$suffix.dll"
-          Copy-Item "build-$arch/bin/Release/WatcherInjector.exe" "out/WatcherInjector$suffix.exe"
+
+          $dll = Get-ChildItem -Recurse "build-$arch" -Filter "WatcherInjector.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $dll) { throw "WatcherInjector.dll not found under build-$arch" }
+          Copy-Item $dll.FullName "out/WatcherInjector$suffix.dll" -Force
+
+          $exe = Get-ChildItem -Recurse "build-$arch" -Filter "WatcherInjector.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw "WatcherInjector.exe not found under build-$arch" }
+          Copy-Item $exe.FullName "out/WatcherInjector$suffix.exe" -Force
+
+          Write-Host "Collected:"
+          Get-ChildItem out | Format-Table Name,Length
 
       - name: Upload artifacts (${{ matrix.arch }})
         uses: actions/upload-artifact@v4
@@ -55,8 +74,9 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force rel | Out-Null
-          Get-ChildItem -Recurse "collected" -Filter "WatcherInjector*.dll" | Copy-Item -Destination rel
-          Get-ChildItem -Recurse "collected" -Filter "WatcherInjector*.exe" | Copy-Item -Destination rel
+          Get-ChildItem -Recurse "collected" -Filter "WatcherInjector*.dll" | Copy-Item -Destination rel -Force
+          Get-ChildItem -Recurse "collected" -Filter "WatcherInjector*.exe" | Copy-Item -Destination rel -Force
+          Write-Host "Release files:"
           Get-ChildItem rel | Format-Table Name,Length
 
       - name: Publish to release
