@@ -1,10 +1,14 @@
 // Minimal Injector EXE:
 // - Finds Visual Pinball window "Visual Pinball - ["
 // - Injects WatcherInjector{32,64}.dll placed next to the EXE
+// - Fallback for local builds: also accepts "WatcherInjector.dll"
 
 #include <windows.h>
 #include <string>
 #include <iostream>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 static BOOL CALLBACK EnumCb(HWND h, LPARAM p) {
     if (!IsWindowVisible(h)) return TRUE;
@@ -32,6 +36,25 @@ static std::wstring ModuleDir() {
     return (pos == std::wstring::npos) ? L"." : p.substr(0, pos);
 }
 
+static std::wstring ResolveDllPath() {
+    std::wstring dir = ModuleDir();
+    // Preferred packaged names
+    std::wstring primary = (sizeof(void*) == 8)
+        ? (dir + L"\\WatcherInjector64.dll")
+        : (dir + L"\\WatcherInjector32.dll");
+
+    std::error_code ec;
+    if (fs::exists(primary, ec)) {
+        return primary;
+    }
+    // Local build fallback
+    std::wstring local = dir + L"\\WatcherInjector.dll";
+    if (fs::exists(local, ec)) {
+        return local;
+    }
+    return primary; // return preferred anyway (error will show later)
+}
+
 int wmain() {
     DWORD pid = FindVPXProcess();
     if (!pid) {
@@ -39,8 +62,7 @@ int wmain() {
         return 1;
     }
 
-    const wchar_t* dllName = (sizeof(void*) == 8) ? L"WatcherInjector64.dll" : L"WatcherInjector32.dll";
-    std::wstring dllPath = ModuleDir() + L"\\" + dllName;
+    std::wstring dllPath = ResolveDllPath();
 
     HANDLE hProc = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
                                PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
