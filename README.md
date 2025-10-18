@@ -1,4 +1,4 @@
-# WatcherInjector (DLL + Injector EXE for Achievement Watcher)
+# WatcherInjector
 
 This repository builds the two components used by Achievement Watcher:
 - WatcherInjector{32,64}.dll: DLL that reads a simple INI (watchtower_hook.ini in BASE), polls NVRAM, and writes live_control.json
@@ -9,15 +9,6 @@ Outputs (on releases):
 - WatcherInjector32.dll
 - WatcherInjector64.exe
 - WatcherInjector32.exe
-
-How Achievement Watcher downloads them automatically
-Set in Achievement Watcher config.json:
-```json
-{
-  "HOOK_AUTO_SETUP": true,
-  "HOOK_BIN_URL_BASE": "https://github.com/Mizzlsolti/WatcherInjector/releases/download/v0.1.0"
-}
-```
 
 Local build (Windows, CMake + MSVC)
 ```powershell
@@ -30,24 +21,33 @@ cmake -S . -B build32 -A Win32 -DCMAKE_BUILD_TYPE=Release
 cmake --build build32 --config Release
 ```
 
-INI format (written by Achievement Watcher to BASE\watchtower_hook.ini)
+INI format (written by Achievement Watcher to BASE\watchtower_hook.ini or legacy BASE\watcher_hook.ini)
 ```
 base=C:\vPinball\Achievements
 rom=afm_113b
 nvram=C:\vPinball\VisualPinball\VPinMAME\nvram\afm_113b.nv
-field=current_player,offset=123,size=1,mask=3,value_offset=1
-field=player_count,offset=55,size=1,mask=0,value_offset=0
-field=current_ball,offset=56,size=1,mask=0,value_offset=0
-field=Balls Played,offset=200,size=1,mask=0,value_offset=0
+field=label=current_player,offset=123,size=1,mask=3,value_offset=1
+field=label=player_count,offset=55,size=1,mask=0,value_offset=0
+field=label=current_ball,offset=56,size=1,mask=0,value_offset=0
+field=label=Balls Played,offset=200,size=1,mask=0,value_offset=0
 ```
 
-The DLL writes:
-`{ "rom":"...", "cp":1, "pc":1, "cb":1, "bp":0, "ts": 1740000000000 }`
-to `BASE\session_stats\live_control.json` every ~200ms.
-
 Notes
-- The DLL looks for the INI at one directory above the DLL (BASE\watchtower_hook.ini), since binaries live in BASE\bin.
+- The DLL looks for the INI one directory above the DLL (BASE\watchtower_hook.ini preferred), since binaries live in BASE\bin.
+- Legacy name BASE\watcher_hook.ini is also accepted (and as a fallback the same files next to the DLL in BASE\bin).
+- Field lines are accepted in both formats:
+  - `field=label=...,offset=...,size=...,mask=...,value_offset=...`
+  - `field=current_player,offset=...,size=...,mask=...,value_offset=...` (legacy, label is the first token)
 - Anti-virus may flag injection. Builds are unsigned test binaries.
 
-License
-MIT
+Where the DLL writes JSON
+- The DLL writes every ~200ms to:
+  - `BASE\session_stats\live_control.json` (primary)
+  - and mirrors to `BASE\live_control.json` (compatibility)
+- JSON example:
+```
+{ "rom":"afm_113b", "cp":1, "pc":2, "cb":1, "bp":0, "ts": 1740000000000 }
+```
+
+Packaging note
+- Release artifacts are named with 32/64 suffixes. The injector EXE prefers `WatcherInjector64.dll` or `WatcherInjector32.dll` next to it, but will fallback to `WatcherInjector.dll` for local builds.
