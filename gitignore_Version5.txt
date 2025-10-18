@@ -1,0 +1,11 @@
+# Build trees and artifacts
+build*/
+out/
+collected/
+rel/
+*.VC.db
+*.VC.VC.opendb
+
+# OS
+.DS_Store
+Thumbs.db
