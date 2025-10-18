@@ -1,10 +1,13 @@
-// Minimal Injector EXE:
-// - Finds Visual Pinball window "Visual Pinball - ["
-// - Injects WatcherInjector{32,64}.dll placed next to the EXE
+// WatcherInjector EXE
+// - Sucht das VPX Hauptfenster
+// - Injiziert WatcherInjector{64,32}.dll aus dem EXE-Verzeichnis (empfohlen: BASE\bin)
 
 #include <windows.h>
 #include <string>
 #include <iostream>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 static BOOL CALLBACK EnumCb(HWND h, LPARAM p) {
     if (!IsWindowVisible(h)) return TRUE;
@@ -16,6 +19,7 @@ static BOOL CALLBACK EnumCb(HWND h, LPARAM p) {
     }
     return TRUE;
 }
+
 static DWORD FindVPXProcess() {
     HWND found = nullptr;
     EnumWindows(EnumCb, reinterpret_cast<LPARAM>(&found));
@@ -24,12 +28,26 @@ static DWORD FindVPXProcess() {
     GetWindowThreadProcessId(found, &pid);
     return pid;
 }
+
 static std::wstring ModuleDir() {
     wchar_t path[MAX_PATH]{0};
     GetModuleFileNameW(nullptr, path, MAX_PATH);
     std::wstring p = path;
     size_t pos = p.find_last_of(L"\\/");
     return (pos == std::wstring::npos) ? L"." : p.substr(0, pos);
+}
+
+static std::wstring ResolveDllPath() {
+    std::wstring dir = ModuleDir();
+    std::wstring primary = (sizeof(void*) == 8)
+        ? (dir + L"\\WatcherInjector64.dll")
+        : (dir + L"\\WatcherInjector32.dll");
+    std::error_code ec;
+    if (fs::exists(primary, ec)) return primary;
+    // Local build fallback
+    std::wstring local = dir + L"\\WatcherInjector.dll";
+    if (fs::exists(local, ec)) return local;
+    return primary; // return preferred anyway; failure will be reported later
 }
 
 int wmain() {
@@ -39,8 +57,7 @@ int wmain() {
         return 1;
     }
 
-    const wchar_t* dllName = (sizeof(void*) == 8) ? L"WatcherInjector64.dll" : L"WatcherInjector32.dll";
-    std::wstring dllPath = ModuleDir() + L"\\" + dllName;
+    std::wstring dllPath = ResolveDllPath();
 
     HANDLE hProc = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
                                PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
