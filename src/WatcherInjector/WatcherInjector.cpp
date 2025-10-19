@@ -1,6 +1,8 @@
-// WatcherInjector DLL
-// - INI: BASE\bin\watcher_hook.ini (gleicher Ordner wie die DLL)
-// - Liest NVRAM und schreibt BASE\session_stats\live_control.json
+// Minimal WatcherInjector DLL (single JSON target)
+// - Accepts BASE\watchtower_hook.ini (preferred) or BASE\watcher_hook.ini (legacy)
+// - Polls the NVRAM file defined there
+// - Writes ONLY BASE\session_stats\live_control.json
+// - Ensures BASE\live_control.json does NOT exist (removes it if present)
 
 #include <windows.h>
 #include <string>
@@ -12,10 +14,11 @@
 #include <codecvt>
 #include <cwctype>
 #include <filesystem>
+#include <cstring>
+#include <locale>
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 namespace fs = std::filesystem;
-
 static std::atomic<bool> g_running{false};
 
 struct Field {
@@ -39,49 +42,63 @@ static inline std::wstring trim(const std::wstring& s) {
     while (j > i && iswspace(s[j - 1])) --j;
     return s.substr(i, j - i);
 }
+
 static std::string narrow(const std::wstring& w) {
+    if (w.empty()) return std::string();
     int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    std::string s(n > 0 ? n : 0, '\0');
-    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr, nullptr);
+    std::string s(n, '\0');
+    if (n > 0) {
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr, nullptr);
+    }
     return s;
 }
 
+// Find INI near BASE (DLL expected in BASE\bin => BASE = parent_of(bin))
 static bool find_ini_path(fs::path& outIni) {
-    // INI liegt im selben Ordner wie die DLL: BASE\bin\watcher_hook.ini
     wchar_t modPathW[MAX_PATH]{0};
     GetModuleFileNameW((HMODULE)&__ImageBase, modPathW, MAX_PATH);
     fs::path mod(modPathW);
-    fs::path binDir = mod.parent_path();
-    fs::path ini = binDir / L"watcher_hook.ini";
-    std::error_code ec;
-    if (fs::exists(ini, ec)) {
-        outIni = ini;
-        return true;
+    fs::path baseDir = mod.parent_path().parent_path();   // BASE
+    fs::path binDir  = mod.parent_path();                 // BASE\bin
+
+    std::vector<fs::path> candidates = {
+        baseDir / L"watchtower_hook.ini", // preferred (new name)
+        baseDir / L"watcher_hook.ini",    // legacy
+        binDir  / L"watchtower_hook.ini", // fallback (manual testing)
+        binDir  / L"watcher_hook.ini"     // legacy fallback
+    };
+    for (const auto& p : candidates) {
+        std::error_code ec;
+        if (fs::exists(p, ec)) {
+            outIni = p;
+            return true;
+        }
     }
     return false;
 }
 
-static bool parse_field_line(const std::wstring& line, Field& out) {
-    // Akzeptiert:
-    // field=label=...,offset=...,size=...,mask=...,value_offset=...
-    // sowie legacy: field=current_player,offset=...
-    size_t eq = line.find(L'=');
+// Robust field parser: accepts "field=label=...,offset=...,size=...,mask=...,value_offset=..."
+// Also accepts legacy first-token label and hex numbers (0x...) for offset/mask/value_offset
+static bool parse_field(const std::wstring& full_line, Field& out) {
+    size_t eq = full_line.find(L'=');
     if (eq == std::wstring::npos) return false;
-    std::wstring rest = line.substr(eq + 1);
+    std::wstring rest = full_line.substr(eq + 1);
     std::wstringstream ss(rest);
-    std::wstring token;
-    Field f;
-    bool haveAny = false;
+    std::wstring token; Field f;
+
+    bool sawExplicitLabel = false;
+    bool sawAnyToken = false;
 
     while (std::getline(ss, token, L',')) {
         token = trim(token);
         if (token.empty()) continue;
-        haveAny = true;
+        sawAnyToken = true;
 
         size_t p = token.find(L'=');
         if (p == std::wstring::npos) {
-            if (f.label.empty()) {
-                f.label = token; // legacy: erstes token als label
+            // Legacy form: first bare token becomes label if no explicit label= seen yet
+            if (!sawExplicitLabel && f.label.empty()) {
+                f.label = token;
             }
             continue;
         }
@@ -89,20 +106,31 @@ static bool parse_field_line(const std::wstring& line, Field& out) {
         std::wstring v = trim(token.substr(p + 1));
         for (auto& c : k) c = (wchar_t)towlower(c);
 
-        if (k == L"label") f.label = v;
-        else if (k == L"offset") { try { f.offset = (size_t)std::stoul(v, nullptr, 0); } catch (...) {} }
-        else if (k == L"size") { try { f.size = std::stoi(v, nullptr, 0); } catch (...) {} }
-        else if (k == L"mask") { try { f.mask = (unsigned int)std::stoul(v, nullptr, 0); } catch (...) {} }
-        else if (k == L"value_offset") { try { f.value_offset = std::stoi(v, nullptr, 0); } catch (...) {} }
+        if (k == L"label") {
+            f.label = v;
+            sawExplicitLabel = true;
+        } else if (k == L"offset") {
+            try { f.offset = (size_t)std::stoul(v, nullptr, 0); } catch (...) {}
+        } else if (k == L"size") {
+            try { f.size = std::stoi(v, nullptr, 0); } catch (...) {}
+        } else if (k == L"mask") {
+            try { f.mask = (unsigned int)std::stoul(v, nullptr, 0); } catch (...) {}
+        } else if (k == L"value_offset") {
+            try { f.value_offset = std::stoi(v, nullptr, 0); } catch (...) {}
+        }
     }
-    if (!haveAny || f.label.empty()) return false;
+    if (!sawAnyToken) return false;
+    if (f.label.empty()) return false;
     out = f;
     return true;
 }
 
+// Load INI (BASE\watchtower_hook.ini preferred or legacy names)
 static bool load_ini(Cfg& cfg) {
     fs::path ini;
-    if (!find_ini_path(ini)) return false;
+    if (!find_ini_path(ini)) {
+        return false;
+    }
 
     std::wifstream in(ini);
     if (!in.is_open()) return false;
@@ -123,10 +151,10 @@ static bool load_ini(Cfg& cfg) {
         else if (key == L"nvram") cfg.nvram = val;
         else if (key == L"field") {
             Field f;
-            if (parse_field_line(line, f)) cfg.fields.push_back(f);
+            if (parse_field(line, f)) cfg.fields.push_back(f);
         }
     }
-    return !cfg.base.empty() && !cfg.nvram.empty();
+    return !cfg.base.empty() && !cfg.nvram.empty() && !cfg.fields.empty();
 }
 
 static bool read_bytes(const std::wstring& path, std::vector<uint8_t>& out) {
@@ -144,8 +172,10 @@ static bool read_bytes(const std::wstring& path, std::vector<uint8_t>& out) {
 static int extract_value(const std::vector<uint8_t>& buf, const Field& f) {
     if (f.offset + (size_t)f.size > buf.size()) return 0;
     unsigned int v = 0;
-    if (f.size == 1) v = buf[f.offset];
-    else {
+    if (f.size == 1) {
+        v = buf[f.offset];
+    } else {
+        // Big-endian interpretation (matches historical behavior here)
         for (int i = f.size - 1; i >= 0; --i)
             v = (v << 8) | buf[f.offset + (size_t)i];
     }
@@ -160,27 +190,37 @@ static void ensure_dir(const fs::path& p) {
     fs::create_directories(p, ec);
 }
 
+// Write JSON only to session_stats and ensure root file is removed
 static void write_json(const std::wstring& base, const std::wstring& rom, int cp, int pc, int cb, int bp) {
-    fs::path out = fs::path(base) / L"session_stats" / L"live_control.json";
-    ensure_dir(out.parent_path());
-    std::ostringstream ss;
-    ss << "{";
-    ss << "\"rom\":\"" << narrow(rom) << "\"";
-    if (cp >= 0) ss << ",\"cp\":" << cp;
-    if (pc >= 0) ss << ",\"pc\":" << pc;
-    if (cb >= 0) ss << ",\"cb\":" << cb;
-    if (bp >= 0) ss << ",\"bp\":" << bp;
-    ss << ",\"ts\":" << GetTickCount64();
-    ss << "}\n";
-    std::ofstream f(out, std::ios::binary | std::ios::trunc);
-    auto s = ss.str();
-    f.write(s.data(), (std::streamsize)s.size());
+    auto write_one = [&](const fs::path& out) {
+        ensure_dir(out.parent_path());
+        std::ostringstream ss;
+        ss << "{";
+        ss << "\"rom\":\"" << narrow(rom) << "\"";
+        if (cp >= 0) ss << ",\"cp\":" << cp;
+        if (pc >= 0) ss << ",\"pc\":" << pc;
+        if (cb >= 0) ss << ",\"cb\":" << cb;
+        if (bp >= 0) ss << ",\"bp\":" << bp;
+        ss << ",\"ts\":" << GetTickCount64();
+        ss << "}\n";
+        std::ofstream f(out, std::ios::binary | std::ios::trunc);
+        auto s = ss.str();
+        f.write(s.data(), (std::streamsize)s.size());
+    };
+
+    // Single source of truth
+    fs::path out1 = fs::path(base) / L"session_stats" / L"live_control.json";
+    write_one(out1);
+
+    // Actively ensure root mirror does not exist
+    std::error_code ec;
+    fs::remove(fs::path(base) / L"live_control.json", ec);
 }
 
 static DWORD WINAPI Worker(LPVOID) {
     Cfg cfg;
     if (!load_ini(cfg)) {
-        Sleep(1500);
+        Sleep(2000);
         return 0;
     }
     g_running = true;
@@ -196,15 +236,15 @@ static DWORD WINAPI Worker(LPVOID) {
 
         std::vector<uint8_t> buf;
         if (read_bytes(cfg.nvram, buf)) {
-            int cp=-1, pc=-1, cb=-1, bp=-1;
+            int cp = -1, pc = -1, cb = -1, bp = -1;
             for (const auto& f : cfg.fields) {
                 int v = extract_value(buf, f);
                 std::wstring l = f.label;
-                for (auto& c: l) c = (wchar_t)towlower(c);
+                for (auto& c : l) c = (wchar_t)towlower(c);
                 if (l == L"current_player") cp = v;
                 else if (l == L"player_count") pc = v;
                 else if (l == L"current_ball") cb = v;
-                else if (l == L"balls played" || (l.find(L"balls")!=std::wstring::npos && l.find(L"played")!=std::wstring::npos)) bp = v;
+                else if (l == L"balls played" || (l.find(L"balls") != std::wstring::npos && l.find(L"played") != std::wstring::npos)) bp = v;
             }
             write_json(cfg.base, cfg.rom, cp, pc, cb, bp);
         }
