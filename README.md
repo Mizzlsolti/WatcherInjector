@@ -6,9 +6,7 @@ This repository builds the two components used by Achievement Watcher:
 
 Outputs (on releases):
 - WatcherInjector64.dll
-- WatcherInjector32.dll
 - WatcherInjector64.exe
-- WatcherInjector32.exe
 
 Local build (Windows, CMake + MSVC)
 ```powershell
